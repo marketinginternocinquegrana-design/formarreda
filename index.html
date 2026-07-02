@@ -196,6 +196,13 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#111214;color:#e8
         <option value="168">1 settimana</option>
       </select>
     </div>
+    <div class="field">
+      <label style="font-size:13px;font-weight:600;margin-bottom:6px;display:block">Store abilitati</label>
+      <select id="modal-set-active-stores" multiple size="6" style="width:100%;border:1px solid var(--br);border-radius:8px;padding:8px 12px;font-size:14px;background:var(--cb);color:var(--tx);font-family:inherit" onchange="onModalStoresChange()">
+        <option value="__ALL__" selected>&#9989; Tutti gli store</option>
+      </select>
+      <div class="mu sm-tx mt1">Tieni premuto Ctrl (o Cmd su Mac) per selezionare pi&ugrave; store. Scegliendo "Tutti gli store" gli altri si deselezionano.</div>
+    </div>
     <div class="flex gap2 jb" style="margin-top:1rem">
       <button class="btn" onclick="document.getElementById('modal-set-active').style.display='none'">Annulla</button>
       <button class="btn pr" onclick="confirmSetActive()"><i class="ti ti-check"></i> Conferma</button>
@@ -599,8 +606,9 @@ var results = [];   // local session results cache
 var stores = [];    // array of store names
 var employees = []; // array of {code, name, store}
 var _empMap = {};   // code -> {name, store}
-var activeLesson = '';  // codice lezione attiva del giorno (da Supabase settings)
-var activeLessonExpires = null; // ISO string scadenza lezione attiva
+var activeLessons = []; // array di {id, code, stores:[] (vuoto = tutti), expiresAt}
+var activeLesson = '';  // compat: codice dell'ultima lezione attivata (usato in vari punti UI)
+var activeLessonExpires = null; // compat: scadenza dell'ultima lezione attivata
 var _countdownInterval = null;
 var _md = {};       // module builder: _md[i] = {imgs:[], imgFiles:[], questions:[]}
 
@@ -774,6 +782,7 @@ function showEmpInfo(code,emp){
   if(!found){ var o=document.createElement('option');o.value=emp.store;o.textContent=emp.store;lsSel.appendChild(o); }
   lsSel.value=emp.store;
   localStorage.setItem('ua_emp_code',code);
+  renderLoginLessons();
 }
 
 function resetEmpCode(){
@@ -783,6 +792,7 @@ function resetEmpCode(){
   document.getElementById('ln').value='';
   document.getElementById('ls').value='';
   localStorage.removeItem('ua_emp_code');
+  renderLoginLessons();
 }
 
 // ─── SUPABASE: LESSONS ────────────────────────────────────────────────────────
@@ -820,26 +830,84 @@ function addDemoLesson(){
   };
 }
 
-// ─── SUPABASE: ACTIVE LESSON ─────────────────────────────────────────────────
+// ─── SUPABASE: ACTIVE LESSONS (multi-store) ──────────────────────────────────
+async function saveActiveLessonsToDB(){
+  var json=JSON.stringify(activeLessons);
+  var {data:upd,error:updErr}=await sb.from('settings').update({value:json}).eq('key','active_lessons_json').select();
+  if(updErr) return updErr;
+  if(!upd||upd.length===0){
+    var {error:insErr}=await sb.from('settings').insert({key:'active_lessons_json',value:json});
+    if(insErr) return insErr;
+  }
+  return null;
+}
+
+function _syncActiveLegacyVars(){
+  if(!activeLessons.length){activeLesson='';activeLessonExpires=null;return;}
+  var latest=activeLessons.slice().sort(function(a,b){return new Date(b.expiresAt)-new Date(a.expiresAt);})[0];
+  activeLesson=latest.code;
+  activeLessonExpires=latest.expiresAt;
+}
+
 async function loadActiveLesson(){
   try{
-    var {data,error}=await sb.from('settings').select('key,value').in('key',['active_lesson','active_lesson_expires']);
-    if(error){console.warn('loadActiveLesson:',error.message);activeLesson='';return;}
-    var lr=data&&data.find(function(r){return r.key==='active_lesson';});
-    var er=data&&data.find(function(r){return r.key==='active_lesson_expires';});
-    activeLesson=(lr&&lr.value)?lr.value:'';
-    activeLessonExpires=(er&&er.value)?er.value:null;
-    if(activeLesson&&activeLessonExpires&&new Date()>new Date(activeLessonExpires)){
-      activeLesson='';activeLessonExpires=null;
-      sb.from('settings').update({value:''}).eq('key','active_lesson');
-      sb.from('settings').update({value:''}).eq('key','active_lesson_expires');
+    var {data,error}=await sb.from('settings').select('key,value').in('key',['active_lessons_json','active_lesson','active_lesson_expires']);
+    if(error){console.warn('loadActiveLesson:',error.message);activeLessons=[];return;}
+    var jsonRow=data&&data.find(function(r){return r.key==='active_lessons_json';});
+    if(jsonRow&&jsonRow.value){
+      try{ activeLessons=JSON.parse(jsonRow.value)||[]; }catch(e){ activeLessons=[]; }
+    } else {
+      var lr=data&&data.find(function(r){return r.key==='active_lesson';});
+      var er=data&&data.find(function(r){return r.key==='active_lesson_expires';});
+      activeLessons=[];
+      if(lr&&lr.value&&er&&er.value&&new Date()<new Date(er.value)){
+        activeLessons.push({id:'legacy-'+Date.now(),code:lr.value,stores:[],expiresAt:er.value});
+      }
+      await saveActiveLessonsToDB();
     }
-  }catch(e){console.warn('loadActiveLesson exception:',e);activeLesson='';}
+    var now=new Date();
+    var before=activeLessons.length;
+    activeLessons=activeLessons.filter(function(e){return new Date(e.expiresAt)>now;});
+    if(activeLessons.length!==before){ await saveActiveLessonsToDB(); }
+    _syncActiveLegacyVars();
+  }catch(e){console.warn('loadActiveLesson exception:',e);activeLessons=[];}
+}
+
+function onModalStoresChange(){
+  var sel=document.getElementById('modal-set-active-stores');
+  var opts=Array.from(sel.options);
+  var allOpt=opts.find(function(o){return o.value==='__ALL__';});
+  var justClickedAll=allOpt&&allOpt.selected;
+  var anyOtherSelected=opts.some(function(o){return o.value!=='__ALL__'&&o.selected;});
+  if(justClickedAll&&anyOtherSelected){
+    opts.forEach(function(o){ if(o.value!=='__ALL__') o.selected=false; });
+  } else if(anyOtherSelected&&allOpt){
+    allOpt.selected=false;
+  } else if(!anyOtherSelected&&!justClickedAll&&allOpt){
+    allOpt.selected=true;
+  }
 }
 
 function showSetActiveModal(code){
   document.getElementById('modal-set-active-code').textContent=code;
-  document.getElementById('modal-set-active-hrs').value='48';
+  var existing=activeLessons.find(function(e){return e.code===code;});
+  var hrsSel=document.getElementById('modal-set-active-hrs');
+  if(existing){
+    var remainingHrs=Math.max(1,Math.round((new Date(existing.expiresAt)-new Date())/3600000));
+    var opt=Array.from(hrsSel.options).find(function(o){return parseInt(o.value,10)===remainingHrs;});
+    hrsSel.value=opt?opt.value:'48';
+  } else {
+    hrsSel.value='48';
+  }
+  var sel=document.getElementById('modal-set-active-stores');
+  sel.innerHTML='<option value="__ALL__">&#9989; Tutti gli store</option>'
+    + stores.map(function(s){return '<option value="'+esc(s.name)+'">'+esc(s.name)+'</option>';}).join('');
+  var allOpt=sel.options[0];
+  if(existing&&existing.stores&&existing.stores.length){
+    Array.from(sel.options).forEach(function(o){ o.selected = existing.stores.indexOf(o.value)!==-1; });
+  } else {
+    allOpt.selected=true;
+  }
   document.getElementById('modal-set-active').dataset.code=code;
   document.getElementById('modal-set-active').style.display='flex';
 }
@@ -848,40 +916,37 @@ async function confirmSetActive(){
   var modal=document.getElementById('modal-set-active');
   var code=modal.dataset.code;
   var hrs=parseInt(document.getElementById('modal-set-active-hrs').value,10)||48;
+  var sel=document.getElementById('modal-set-active-stores');
+  var selectedVals=Array.from(sel.selectedOptions).map(function(o){return o.value;});
+  var storesSel = (selectedVals.indexOf('__ALL__')!==-1||selectedVals.length===0) ? [] : selectedVals;
   modal.style.display='none';
   var expiresAt=new Date(Date.now()+hrs*3600000).toISOString();
-  showLoad('Impostazione lezione del giorno...');
-  var {data:upd,error:updErr}=await sb.from('settings').update({value:code}).eq('key','active_lesson').select();
-  if(updErr){hideLoad();alert('Errore: '+updErr.message);return;}
-  if(!upd||upd.length===0){
-    var {error:insErr}=await sb.from('settings').insert({key:'active_lesson',value:code});
-    if(insErr){hideLoad();alert('Errore: '+insErr.message);return;}
-  }
-  var {data:upd2,error:updErr2}=await sb.from('settings').update({value:expiresAt}).eq('key','active_lesson_expires').select();
-  if(updErr2){hideLoad();alert('Errore: '+updErr2.message);return;}
-  if(!upd2||upd2.length===0){
-    var {error:insErr2}=await sb.from('settings').insert({key:'active_lesson_expires',value:expiresAt});
-    if(insErr2){hideLoad();alert('Errore: '+insErr2.message);return;}
-  }
+  showLoad('Attivazione lezione...');
+  activeLessons=activeLessons.filter(function(e){return e.code!==code;});
+  activeLessons.push({id:code+'-'+Date.now(),code:code,stores:storesSel,expiresAt:expiresAt});
+  var err=await saveActiveLessonsToDB();
   hideLoad();
-  activeLesson=code;
-  activeLessonExpires=expiresAt;
+  if(err){alert('Errore: '+err.message);return;}
+  _syncActiveLegacyVars();
   renderSavedLessons();
   renderActiveLessonDashboard();
+  renderLoginLessons();
   startCountdown();
-  alert('\u2705 Lezione "'+code+'" attiva per '+hrs+'h. Scadenza: '+new Date(expiresAt).toLocaleString('it-IT'));
+  var storeTxt=storesSel.length?storesSel.join(', '):'tutti gli store';
+  alert('\u2705 Lezione "'+code+'" attiva per '+hrs+'h su: '+storeTxt+'.\nScadenza: '+new Date(expiresAt).toLocaleString('it-IT'));
 }
 
-async function clearActiveLesson(){
-  showLoad('Rimozione lezione del giorno...');
-  await sb.from('settings').update({value:''}).eq('key','active_lesson');
-  await sb.from('settings').update({value:''}).eq('key','active_lesson_expires');
+async function clearActiveLesson(code){
+  showLoad('Rimozione attivazione...');
+  activeLessons=activeLessons.filter(function(e){return e.code!==code;});
+  var err=await saveActiveLessonsToDB();
   hideLoad();
-  activeLesson='';
-  activeLessonExpires=null;
-  stopCountdown();
+  if(err){alert('Errore: '+err.message);return;}
+  _syncActiveLegacyVars();
+  if(!activeLessons.length) stopCountdown();
   renderSavedLessons();
   renderActiveLessonDashboard();
+  renderLoginLessons();
 }
 
 async function saveLesson(){
@@ -1057,6 +1122,7 @@ async function goAdmin(){
   await loadLessons();
   await loadActiveLesson();
   await loadResults();
+  await loadEmployees();
   hideLoad();
   show('admin');
   renderModBuilder();
@@ -1069,7 +1135,7 @@ async function goAdmin(){
   renderStoricoFilters();
   document.getElementById('lcode').value=genCode();
   startLivePolling();
-  if(activeLesson&&activeLessonExpires) startCountdown();
+  if(activeLessons.length) startCountdown();
 }
 
 function aTab(t){
@@ -1122,79 +1188,104 @@ function stopCountdown(){
   if(_countdownInterval){clearInterval(_countdownInterval);_countdownInterval=null;}
 }
 function updateCountdown(){
-  if(!activeLessonExpires){stopCountdown();return;}
-  var diff=new Date(activeLessonExpires)-new Date();
-  if(diff<=0){
-    stopCountdown();activeLesson='';activeLessonExpires=null;
-    renderSavedLessons();renderActiveLessonDashboard();return;
+  if(!activeLessons.length){stopCountdown();return;}
+  var now=new Date();
+  document.querySelectorAll('.active-lesson-countdown').forEach(function(elx){
+    var exp=elx.getAttribute('data-expires');
+    if(!exp) return;
+    var diff=new Date(exp)-now;
+    if(diff<=0){ elx.textContent='scaduta'; return; }
+    var h=Math.floor(diff/3600000);
+    var m=Math.floor((diff%3600000)/60000);
+    var s=Math.floor((diff%60000)/1000);
+    elx.textContent=h+'h '+m+'m '+s+'s';
+  });
+  var stillValid=activeLessons.filter(function(e){return new Date(e.expiresAt)>now;});
+  if(stillValid.length!==activeLessons.length){
+    activeLessons=stillValid;
+    _syncActiveLegacyVars();
+    saveActiveLessonsToDB();
+    renderSavedLessons();
+    renderActiveLessonDashboard();
+    renderLoginLessons();
   }
-  var h=Math.floor(diff/3600000);
-  var m=Math.floor((diff%3600000)/60000);
-  var s=Math.floor((diff%60000)/1000);
-  var txt=h+'h '+m+'m '+s+'s';
-  document.querySelectorAll('.active-lesson-countdown').forEach(function(el){el.textContent=txt;});
 }
 
 function renderActiveLessonDashboard(){
   var el=document.getElementById('active-lesson-dashboard');
   if(!el) return;
-  if(!activeLesson||!lessons[activeLesson]){el.innerHTML='';return;}
-  var l=lessons[activeLesson];
-  var lr=results.filter(function(r){return r.code===activeLesson;});
-  var doneMap={};
-  lr.forEach(function(r){
-    var k=r.user+'|||'+r.store;
-    if(!doneMap[k]||r.pct>doneMap[k].pct) doneMap[k]={name:r.user,store:r.store,pct:r.pct};
-  });
-  var allMap={};
-  results.forEach(function(r){
-    var k=r.user+'|||'+r.store;
-    if(!allMap[k]) allMap[k]={name:r.user,store:r.store};
-  });
-  var waiting=[];
-  Object.keys(allMap).forEach(function(k){if(!doneMap[k]) waiting.push(allMap[k]);});
-  var doneList=Object.values(doneMap).sort(function(a,b){return b.pct-a.pct;});
-  waiting.sort(function(a,b){return a.store.localeCompare(b.store)||a.name.localeCompare(b.name);});
-  var expStr=activeLessonExpires?new Date(activeLessonExpires).toLocaleString('it-IT'):'';
-  var html='<div class="card" style="border:2px solid var(--ac);margin-bottom:1rem">';
-  html+='<div class="ch" style="margin-bottom:.75rem">';
-  html+='<i class="ti ti-broadcast" style="color:var(--ac);font-size:20px"></i>';
-  html+='<div style="flex:1"><h2 style="color:var(--ac)">'+esc(l.title)+'</h2>';
-  if(activeLessonExpires){
-    html+='<div style="font-size:12px;color:var(--mu);margin-top:2px">Scade il '+esc(expStr)+'&nbsp;&mdash;&nbsp;<span style="font-weight:700;color:var(--ac)" class="active-lesson-countdown">...</span></div>';
-  }
-  html+='</div>';
-  html+='<button class="btn sm dn" onclick="clearActiveLesson()"><i class="ti ti-x"></i> Termina</button>';
-  html+='</div>';
-  html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem">';
-  html+='<div style="background:rgba(29,158,117,.08);border:1px solid rgba(29,158,117,.3);border-radius:10px;padding:.875rem">';
-  html+='<div style="font-size:13px;font-weight:700;color:var(--ac);margin-bottom:.6rem"><i class="ti ti-circle-check"></i> Completata ('+doneList.length+')</div>';
-  if(!doneList.length){
-    html+='<div style="font-size:12px;color:var(--mu)">Nessuno ancora</div>';
-  } else {
-    doneList.forEach(function(v){
-      var col=v.pct>=70?'var(--ac)':'var(--dng)';
-      html+='<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.06);font-size:13px">'
-        +'<div><div style="font-weight:600">'+esc(v.name)+'</div><div style="font-size:11px;color:var(--mu)">'+esc(v.store)+'</div></div>'
-        +'<span style="font-weight:700;color:'+col+'">'+v.pct+'%</span></div>';
+  if(!activeLessons.length){el.innerHTML='';return;}
+  var sorted=activeLessons.slice().sort(function(a,b){return new Date(a.expiresAt)-new Date(b.expiresAt);});
+  var html='';
+  sorted.forEach(function(entry){
+    var l=lessons[entry.code];
+    if(!l) return;
+    var storeScope = (entry.stores&&entry.stores.length) ? entry.stores : null; // null = tutti gli store
+    var roster = employees.filter(function(e){ return !storeScope || storeScope.indexOf(e.store)!==-1; });
+    var lr=results.filter(function(r){return r.code===entry.code && (!storeScope || storeScope.indexOf(r.store)!==-1);});
+    var doneMap={};
+    lr.forEach(function(r){
+      var k=(r.user||'').trim().toLowerCase()+'|||'+(r.store||'').trim().toLowerCase();
+      if(!doneMap[k]||r.pct>doneMap[k].pct) doneMap[k]={name:r.user,store:r.store,pct:r.pct};
     });
-  }
-  html+='</div>';
-  html+='<div style="background:rgba(245,158,11,.06);border:1px solid rgba(245,158,11,.3);border-radius:10px;padding:.875rem">';
-  html+='<div style="font-size:13px;font-weight:700;color:#f59e0b;margin-bottom:.6rem"><i class="ti ti-clock"></i> In attesa ('+waiting.length+')</div>';
-  if(!waiting.length){
-    html+='<div style="font-size:12px;color:var(--mu)">Tutti hanno completato! &#127881;</div>';
-  } else {
-    waiting.forEach(function(v){
-      html+='<div style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,.06);font-size:13px">'
-        +'<div style="font-weight:600">'+esc(v.name)+'</div>'
-        +'<div style="font-size:11px;color:var(--mu)">'+esc(v.store)+'</div></div>';
-    });
-  }
-  html+='</div>';
-  html+='</div></div>';
+    var doneList=Object.values(doneMap).sort(function(a,b){return b.pct-a.pct;});
+    var waiting=[];
+    if(roster.length){
+      roster.forEach(function(emp){
+        var k=(emp.name||'').trim().toLowerCase()+'|||'+(emp.store||'').trim().toLowerCase();
+        if(!doneMap[k]) waiting.push({name:emp.name,store:emp.store});
+      });
+    } else {
+      var allMap={};
+      results.forEach(function(r){
+        if(storeScope && storeScope.indexOf(r.store)===-1) return;
+        var k=(r.user||'').trim().toLowerCase()+'|||'+(r.store||'').trim().toLowerCase();
+        if(!allMap[k]) allMap[k]={name:r.user,store:r.store};
+      });
+      Object.keys(allMap).forEach(function(k){ if(!doneMap[k]) waiting.push(allMap[k]); });
+    }
+    waiting.sort(function(a,b){return a.store.localeCompare(b.store)||a.name.localeCompare(b.name);});
+    var expStr=new Date(entry.expiresAt).toLocaleString('it-IT');
+    var scopeTxt = storeScope ? storeScope.join(', ') : 'Tutti gli store';
+    html+='<div class="card" style="border:2px solid var(--ac);margin-bottom:1rem">';
+    html+='<div class="ch" style="margin-bottom:.75rem">';
+    html+='<i class="ti ti-broadcast" style="color:var(--ac);font-size:20px"></i>';
+    html+='<div style="flex:1"><h2 style="color:var(--ac)">'+esc(l.title)+'</h2>';
+    html+='<div style="font-size:12px;color:var(--mu);margin-top:2px"><i class="ti ti-building-store" style="font-size:12px"></i> '+esc(scopeTxt)
+      +'&nbsp;&mdash;&nbsp;Scade il '+esc(expStr)+'&nbsp;&mdash;&nbsp;<span style="font-weight:700;color:var(--ac)" class="active-lesson-countdown" data-expires="'+esc(entry.expiresAt)+'">...</span></div>';
+    html+='</div>';
+    html+='<button class="btn sm dn" onclick="clearActiveLesson(\''+entry.code+'\')"><i class="ti ti-x"></i> Termina</button>';
+    html+='</div>';
+    html+='<div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem">';
+    html+='<div style="background:rgba(29,158,117,.08);border:1px solid rgba(29,158,117,.3);border-radius:10px;padding:.875rem">';
+    html+='<div style="font-size:13px;font-weight:700;color:var(--ac);margin-bottom:.6rem"><i class="ti ti-circle-check"></i> Completata ('+doneList.length+')</div>';
+    if(!doneList.length){
+      html+='<div style="font-size:12px;color:var(--mu)">Nessuno ancora</div>';
+    } else {
+      doneList.forEach(function(v){
+        var col=v.pct>=70?'var(--ac)':'var(--dng)';
+        html+='<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;border-bottom:1px solid rgba(255,255,255,.06);font-size:13px">'
+          +'<div><div style="font-weight:600">'+esc(v.name)+'</div><div style="font-size:11px;color:var(--mu)">'+esc(v.store)+'</div></div>'
+          +'<span style="font-weight:700;color:'+col+'">'+v.pct+'%</span></div>';
+      });
+    }
+    html+='</div>';
+    html+='<div style="background:rgba(245,158,11,.06);border:1px solid rgba(245,158,11,.3);border-radius:10px;padding:.875rem">';
+    html+='<div style="font-size:13px;font-weight:700;color:#f59e0b;margin-bottom:.6rem"><i class="ti ti-clock"></i> In attesa ('+waiting.length+')</div>';
+    if(!waiting.length){
+      html+='<div style="font-size:12px;color:var(--mu)">Tutti hanno completato! &#127881;</div>';
+    } else {
+      waiting.forEach(function(v){
+        html+='<div style="padding:4px 0;border-bottom:1px solid rgba(255,255,255,.06);font-size:13px">'
+          +'<div style="font-weight:600">'+esc(v.name)+'</div>'
+          +'<div style="font-size:11px;color:var(--mu)">'+esc(v.store)+'</div></div>';
+      });
+    }
+    html+='</div>';
+    html+='</div></div>';
+  });
   el.innerHTML=html;
-  if(activeLessonExpires) startCountdown();
+  if(activeLessons.length) startCountdown();
 }
 
 function checkPwd(){
@@ -1354,10 +1445,12 @@ function renderSavedLessons(){
     var l=lessons[code];
     var nq=l.modules.reduce(function(a,m){return a+m.questions.length;},0);
     var ns=l.modules.reduce(function(a,m){return a+(m.imgs||[]).length;},0);
-    var isActive=activeLesson===code;
+    var activeEntry=activeLessons.find(function(e){return e.code===code;});
+    var isActive=!!activeEntry;
     var activeBtnStyle=isActive?'background:#e8f5e9;color:#2e7d32;border-color:#a5d6a7;font-weight:600':'';
     var activeBtnLabel=isActive?'<i class="ti ti-calendar-check"></i> Attiva oggi':'<i class="ti ti-calendar"></i> Imposta oggi';
-    var activeBtnClick=isActive?'clearActiveLesson()':'showSetActiveModal(\''+code+'\')';
+    var activeBtnClick=isActive?'clearActiveLesson(\''+code+'\')':'showSetActiveModal(\''+code+'\')';
+    var activeScopeTxt=isActive?((activeEntry.stores&&activeEntry.stores.length)?activeEntry.stores.join(', '):'tutti gli store'):'';
     var isEditOpen=_editOpenCode===code;
 
     var editPanel='';
@@ -1444,8 +1537,8 @@ function renderSavedLessons(){
 
     return '<div style="border-bottom:1px solid var(--br);padding:10px 0;font-size:13px">'
       +'<div style="display:flex;justify-content:space-between;align-items:center">'
-      +'<div><div class="f600">'+esc(l.title)+(isActive?' <span style="font-size:11px;background:#e8f5e9;color:#2e7d32;border-radius:4px;padding:1px 6px;margin-left:4px">oggi</span>':'')+'</div>'
-      +(isActive&&activeLessonExpires?'<div style="font-size:11px;color:#2e7d32;margin-top:1px"><i class="ti ti-clock"></i> Scade tra <span class="active-lesson-countdown" style="font-weight:700">...</span></div>':'')
+      +'<div><div class="f600">'+esc(l.title)+(isActive?' <span style="font-size:11px;background:#e8f5e9;color:#2e7d32;border-radius:4px;padding:1px 6px;margin-left:4px">oggi &middot; '+esc(activeScopeTxt)+'</span>':'')+'</div>'
+      +(isActive?'<div style="font-size:11px;color:#2e7d32;margin-top:1px"><i class="ti ti-clock"></i> Scade tra <span class="active-lesson-countdown" style="font-weight:700" data-expires="'+esc(activeEntry.expiresAt)+'">...</span></div>':'')
       +'<div class="mu" style="margin-top:2px">'+l.modules.length+' moduli · '+nq+' domande · '+ns+' slide · '+l.dur+' min · '+(l.qsec||20)+'s/dom</div></div>'
       +'<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">'
       +'<div class="lcode-tag">'+esc(code)+'</div>'
@@ -1620,14 +1713,22 @@ async function saveEditedLesson(code){
 function renderLoginLessons(){
   var box=document.getElementById('login-lessons-box');
   var list=document.getElementById('login-lessons-list');
-  if(!activeLesson||!lessons[activeLesson]){box.style.display='none';return;}
-  var l=lessons[activeLesson];
+  var lsSel=document.getElementById('ls');
+  var studentStore=lsSel?lsSel.value:'';
+  if(!studentStore||!activeLessons.length){box.style.display='none';return;}
+  var matches=activeLessons.filter(function(e){
+    return lessons[e.code] && (!e.stores||!e.stores.length||e.stores.indexOf(studentStore)!==-1);
+  });
+  if(!matches.length){box.style.display='none';return;}
   box.style.display='block';
-  list.innerHTML='<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;font-size:13px">'
-    +'<div><div class="f600">'+esc(l.title)+'</div>'
-    +'<div class="mu" style="margin-top:2px;font-size:12px">Lezione di oggi</div></div>'
-    +'<div class="lcode-tag" style="cursor:pointer" onclick="document.getElementById(\'lc\').value=\''+activeLesson+'\'">'
-    +esc(activeLesson)+'</div></div>';
+  list.innerHTML=matches.map(function(e){
+    var l=lessons[e.code];
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;font-size:13px">'
+      +'<div><div class="f600">'+esc(l.title)+'</div>'
+      +'<div class="mu" style="margin-top:2px;font-size:12px">Lezione di oggi</div></div>'
+      +'<div class="lcode-tag" style="cursor:pointer" onclick="document.getElementById(\'lc\').value=\''+e.code+'\'">'
+      +esc(e.code)+'</div></div>';
+  }).join('');
 }
 
 function startAsStudent(code){
