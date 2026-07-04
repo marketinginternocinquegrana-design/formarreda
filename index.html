@@ -406,7 +406,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#111214;color:#e8
       <div class="ch"><i class="ti ti-bolt" style="color:var(--dng)"></i><h2>LIVE Manager</h2></div>
       <div id="live-manager-body"><div class="mu sm-tx">Caricamento...</div></div>
       <div id="live-create-form" style="display:none;margin-top:1rem;padding-top:1rem;border-top:1px solid var(--br)">
-        <div style="font-size:13px;font-weight:600;margin-bottom:.75rem">Crea nuova sessione LIVE</div>
+        <div style="font-size:13px;font-weight:600;margin-bottom:.75rem" id="live-form-heading">Crea nuova sessione LIVE</div>
         <div class="field">
           <label>Titolo sessione</label>
           <input type="text" id="live-form-title" placeholder="es. Quiz Tecniche di Vendita &mdash; Giugno 2026">
@@ -416,7 +416,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#111214;color:#e8
         <button class="btn sm" onclick="addLiveBlock()" style="width:100%;margin-bottom:1rem;border-style:dashed"><i class="ti ti-plus"></i> Aggiungi blocco</button>
         <div style="display:flex;gap:8px;justify-content:flex-end">
           <button class="btn sm" onclick="cancelLiveForm()">Annulla</button>
-          <button class="btn sm pr" onclick="saveLiveSession()"><i class="ti ti-check"></i> Salva sessione</button>
+          <button class="btn sm pr" onclick="saveLiveSession()" id="live-form-save-btn"><i class="ti ti-check"></i> Salva sessione</button>
         </div>
       </div>
     </div>
@@ -3221,7 +3221,7 @@ async function showLiveFinalLeaderboard(){
 // ═══════════════════════════════════════════════════════════════════════════
 // ─── LIVE FEATURE — ADMIN SIDE (LIVE MANAGER) ─────────────────────────────
 // ═══════════════════════════════════════════════════════════════════════════
-var lmState = { sessions:[], currentForm:null, editQuestions:[] };
+var lmState = { sessions:[], currentForm:null, editQuestions:[], editSessionId:null };
 
 async function loadLiveSessions(){
   var res = await sb.from('live_sessions').select('*').order('created_at',{ascending:false}).limit(10);
@@ -3254,8 +3254,10 @@ function renderLiveManager(){
       +'<div><div style="font-weight:600;font-size:14px">'+esc(s.title)+'</div>'
       +'<div style="font-size:12px;color:var(--mu);margin-top:2px">'+new Date(s.created_at).toLocaleDateString('it-IT')
       +' &nbsp;<span style="font-size:11px;background:var(--wrn-l);color:var(--wrn);padding:2px 8px;border-radius:99px">Bozza</span></div></div>'
+      +'<div style="display:flex;gap:6px">'
+      +'<button class="btn sm" onclick="editLiveSession(\''+s.id+'\')"><i class="ti ti-pencil"></i> Modifica</button>'
       +'<button class="btn sm pr" onclick="activateLiveSession(\''+s.id+'\')"><i class="ti ti-bolt"></i> Attiva</button>'
-      +'</div>';
+      +'</div></div>';
   });
   html += '<button class="btn sm" style="margin-top:.25rem" onclick="showCreateLiveForm()"><i class="ti ti-plus"></i> Crea nuova LIVE</button>';
   // Storico sessioni terminate
@@ -3267,8 +3269,9 @@ function renderLiveManager(){
         +'<div><div style="font-weight:600;font-size:14px">'+esc(s.title)+'</div>'
         +'<div style="font-size:12px;color:var(--mu);margin-top:2px">'+new Date(s.created_at).toLocaleDateString('it-IT')
         +' &nbsp;<span style="font-size:11px;background:var(--sf);color:var(--mu);padding:2px 8px;border-radius:99px;border:1px solid var(--br)">Terminata</span></div></div>'
-        +'<div style="display:flex;gap:6px">'
+        +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
         +'<button class="btn sm" onclick="showLiveResults(\''+s.id+'\',\''+esc(s.title)+'\')"><i class="ti ti-trophy"></i> Risultati</button>'
+        +'<button class="btn sm" onclick="editLiveSession(\''+s.id+'\')"><i class="ti ti-pencil"></i> Modifica</button>'
         +'<button class="btn sm pr" onclick="reactivateLiveSession(\''+s.id+'\')"><i class="ti ti-refresh"></i> Rifai</button>'
         +'</div></div>';
     });
@@ -3276,12 +3279,12 @@ function renderLiveManager(){
   }
   el.innerHTML = html;
   var formEl = document.getElementById('live-create-form');
-  if(formEl) formEl.style.display = lmState.currentForm==='create' ? 'block' : 'none';
+  if(formEl) formEl.style.display = (lmState.currentForm==='create'||lmState.currentForm==='edit') ? 'block' : 'none';
 }
 
 function makeEmptyBlock(){
   return {
-    slide:{title:'',text:'',color:'#C9A84C',imageFile:null,imagePreviewUrl:null},
+    slide:{title:'',text:'',color:'#C9A84C',imageFile:null,imagePreviewUrl:null,existingImageUrl:null},
     questions:[
       {text:'',options:['','','',''],correct:0,time_limit:20,scoring_mode:'speed'},
       {text:'',options:['','','',''],correct:0,time_limit:20,scoring_mode:'speed'}
@@ -3291,16 +3294,64 @@ function makeEmptyBlock(){
 
 function showCreateLiveForm(){
   lmState.currentForm = 'create';
+  lmState.editSessionId = null;
   lmState.editBlocks = [makeEmptyBlock()];
   renderLiveManager();
+  var h = document.getElementById('live-form-heading'); if(h) h.textContent = 'Crea nuova sessione LIVE';
+  var b = document.getElementById('live-form-save-btn'); if(b) b.innerHTML = '<i class="ti ti-check"></i> Salva sessione';
   renderLiveFormBlocks();
 }
 
 function cancelLiveForm(){
   lmState.currentForm = null;
+  lmState.editSessionId = null;
   lmState.editBlocks = [];
   document.getElementById('live-create-form').style.display = 'none';
   document.getElementById('live-form-title').value = '';
+}
+
+async function editLiveSession(sessionId){
+  showLoad('Caricamento sessione...');
+  try {
+    var sRes = await sb.from('live_sessions').select('*').eq('id',sessionId).single();
+    if(sRes.error) throw sRes.error;
+    var slRes = await sb.from('live_slides').select('*').eq('session_id',sessionId).order('order_index');
+    if(slRes.error) throw slRes.error;
+    var qRes = await sb.from('live_questions').select('*').eq('session_id',sessionId).order('order_index');
+    if(qRes.error) throw qRes.error;
+    var slides = slRes.data || [];
+    var questions = qRes.data || [];
+    var blocks = slides.map(function(sl, bi){
+      var blockQuestions = questions.filter(function(q){ return q.block_index === bi; });
+      if(!blockQuestions.length) blockQuestions = questions.slice(bi*2, bi*2+2);
+      return {
+        slide:{
+          title: sl.title || '', text: sl.body_text || '', color: sl.color || '#C9A84C',
+          imageFile: null, imagePreviewUrl: sl.image_url || null, existingImageUrl: sl.image_url || null
+        },
+        questions: blockQuestions.map(function(q){
+          var opts = Array.isArray(q.options) ? q.options.slice() : JSON.parse(q.options || '[]');
+          while(opts.length < 4) opts.push('');
+          return {
+            text: q.question_text || '', options: opts, correct: q.correct_index || 0,
+            time_limit: q.time_limit || 20, scoring_mode: q.scoring_mode || 'speed'
+          };
+        })
+      };
+    });
+    if(!blocks.length) blocks = [makeEmptyBlock()];
+    lmState.currentForm = 'edit';
+    lmState.editSessionId = sessionId;
+    lmState.editBlocks = blocks;
+    hideLoad();
+    renderLiveManager();
+    var titleEl = document.getElementById('live-form-title'); if(titleEl) titleEl.value = sRes.data.title || '';
+    var h = document.getElementById('live-form-heading'); if(h) h.textContent = 'Modifica sessione LIVE';
+    var b = document.getElementById('live-form-save-btn'); if(b) b.innerHTML = '<i class="ti ti-check"></i> Salva modifiche';
+    renderLiveFormBlocks();
+    var formEl = document.getElementById('live-create-form');
+    if(formEl) formEl.scrollIntoView({behavior:'smooth'});
+  } catch(e){ hideLoad(); alert('Errore nel caricamento della sessione: '+e.message); }
 }
 
 function renderBlockQuestion(bi, qi){
@@ -3395,6 +3446,7 @@ function onBlockImageSelected(bi, input){
 function removeBlockImage(bi){
   lmState.editBlocks[bi].slide.imageFile = null;
   lmState.editBlocks[bi].slide.imagePreviewUrl = null;
+  lmState.editBlocks[bi].slide.existingImageUrl = null;
   var prev = document.getElementById('slide-prev-'+bi);
   var ph = document.getElementById('slide-ph-'+bi);
   var rm = document.getElementById('slide-rm-'+bi);
@@ -3443,15 +3495,27 @@ async function saveLiveSession(){
       if(q.options.filter(function(o){ return o.trim(); }).length < 2){ alert('Blocco '+(i+1)+', Domanda '+(j+1)+': inserisci almeno 2 opzioni.'); return; }
     }
   }
-  showLoad('Salvataggio sessione...');
+  var isEdit = !!lmState.editSessionId;
+  showLoad(isEdit ? 'Salvataggio modifiche...' : 'Salvataggio sessione...');
   try {
-    var sessRes = await sb.from('live_sessions').insert({title:title, status:'draft'}).select().single();
-    if(sessRes.error) throw sessRes.error;
-    var sessId = sessRes.data.id;
+    var sessId;
+    if(isEdit){
+      sessId = lmState.editSessionId;
+      var updRes = await sb.from('live_sessions').update({title:title}).eq('id',sessId);
+      if(updRes.error) throw updRes.error;
+      var delQ = await sb.from('live_questions').delete().eq('session_id',sessId);
+      if(delQ.error) throw delQ.error;
+      var delS = await sb.from('live_slides').delete().eq('session_id',sessId);
+      if(delS.error) throw delS.error;
+    } else {
+      var sessRes = await sb.from('live_sessions').insert({title:title, status:'draft'}).select().single();
+      if(sessRes.error) throw sessRes.error;
+      sessId = sessRes.data.id;
+    }
     var qOrderIndex = 0;
     for(var bi=0; bi<blocks.length; bi++){
       var block = blocks[bi];
-      var imageUrl = null;
+      var imageUrl = block.slide.existingImageUrl || null;
       if(block.slide.imageFile){
         var fileName = 'live-slides/'+sessId+'-b'+bi+'-'+Date.now()+'.jpg';
         var upRes = await sb.storage.from('Formarreda').upload(fileName, block.slide.imageFile, {upsert:true});
@@ -3482,6 +3546,7 @@ async function saveLiveSession(){
     hideLoad();
     lmState.currentForm = null;
     lmState.editBlocks = [];
+    lmState.editSessionId = null;
     document.getElementById('live-form-title').value = '';
     await loadLiveSessions();
   } catch(e){ hideLoad(); alert('Errore nel salvataggio: '+e.message); }
