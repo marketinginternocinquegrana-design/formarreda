@@ -210,6 +210,34 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#111214;color:#e8
   </div>
 </div>
 
+<!-- MODAL: ATTIVA/RIFAI SESSIONE LIVE CON DURATA E STORE -->
+<div class="modal-overlay" id="modal-live-active" style="display:none">
+  <div class="modal-box">
+    <h3><i class="ti ti-bolt"></i> Attiva sessione LIVE</h3>
+    <p>Stai per attivare <strong id="modal-live-active-title"></strong>. Per quante ore resta attiva e per quali store?</p>
+    <div class="field">
+      <label style="font-size:13px;font-weight:600;margin-bottom:6px;display:block">Durata attivazione</label>
+      <select id="modal-live-active-hrs" style="width:100%;border:1px solid var(--br);border-radius:8px;padding:8px 12px;font-size:14px;background:var(--cb);color:var(--tx);font-family:inherit">
+        <option value="24">24 ore</option>
+        <option value="48" selected>48 ore</option>
+        <option value="72">72 ore (3 giorni)</option>
+        <option value="168">1 settimana</option>
+      </select>
+    </div>
+    <div class="field">
+      <label style="font-size:13px;font-weight:600;margin-bottom:6px;display:block">Store abilitati</label>
+      <select id="modal-live-active-stores" multiple size="6" style="width:100%;border:1px solid var(--br);border-radius:8px;padding:8px 12px;font-size:14px;background:var(--cb);color:var(--tx);font-family:inherit" onchange="onLiveActiveStoresChange()">
+        <option value="__ALL__" selected>&#9989; Tutti gli store</option>
+      </select>
+      <div class="mu sm-tx mt1">Tieni premuto Ctrl (o Cmd su Mac) per selezionare pi&ugrave; store. Scegliendo "Tutti gli store" gli altri si deselezionano.</div>
+    </div>
+    <div class="flex gap2 jb" style="margin-top:1rem">
+      <button class="btn" onclick="document.getElementById('modal-live-active').style.display='none'">Annulla</button>
+      <button class="btn pr" onclick="confirmLiveActivate()"><i class="ti ti-check"></i> Conferma</button>
+    </div>
+  </div>
+</div>
+
 <!-- MODAL: CONFERMA ELIMINAZIONE -->
 <div class="modal-overlay" id="modal-confirm" style="display:none">
   <div class="modal-box">
@@ -2841,7 +2869,12 @@ async function checkActiveLiveSession(){
   try {
     var res = await sb.from('live_sessions').select('*').eq('status','active').order('created_at',{ascending:false}).limit(1);
     if(res.error || !res.data || !res.data.length) return null;
-    return res.data[0];
+    var session = res.data[0];
+    if(session.expires_at && new Date(session.expires_at) < new Date()) return null;
+    var studentStore = S.user && S.user.store;
+    var allowedStores = session.stores;
+    if(Array.isArray(allowedStores) && allowedStores.length && studentStore && allowedStores.indexOf(studentStore)===-1) return null;
+    return session;
   } catch(e){ return null; }
 }
 
@@ -3236,9 +3269,12 @@ function renderLiveManager(){
   var active = sessions.find(function(s){ return s.status==='active'; });
   var html = '';
   if(active){
+    var activeScopeTxt = (Array.isArray(active.stores)&&active.stores.length) ? active.stores.join(', ') : 'Tutti gli store';
+    var activeExpTxt = active.expires_at ? new Date(active.expires_at).toLocaleString('it-IT') : '&mdash;';
     html += '<div style="background:rgba(226,75,74,.1);border:1px solid var(--dng);border-radius:10px;padding:1rem;margin-bottom:1rem">'
       +'<div style="display:flex;align-items:center;gap:8px;margin-bottom:.5rem"><span class="live-badge">LIVE</span><strong>'+esc(active.title)+'</strong></div>'
-      +'<div style="font-size:13px;color:var(--mu);margin-bottom:.75rem">Domanda: '+(active.current_question_index>=0?(active.current_question_index+1):'non avviata')+'</div>'
+      +'<div style="font-size:13px;color:var(--mu);margin-bottom:.25rem">Domanda: '+(active.current_question_index>=0?(active.current_question_index+1):'non avviata')+'</div>'
+      +'<div style="font-size:12px;color:var(--mu);margin-bottom:.75rem">Store: '+esc(activeScopeTxt)+' &nbsp;&bull;&nbsp; Scade: '+activeExpTxt+'</div>'
       +'<div style="display:flex;gap:8px;flex-wrap:wrap">'
       +'<a href="live-host.html" target="_blank" class="btn pr sm"><i class="ti ti-external-link"></i> Apri Host Dashboard</a>'
       +'<button class="btn sm dn" onclick="confirmEndLive(\''+active.id+'\')"><i class="ti ti-player-stop"></i> Termina LIVE</button>'
@@ -3256,7 +3292,7 @@ function renderLiveManager(){
       +' &nbsp;<span style="font-size:11px;background:var(--wrn-l);color:var(--wrn);padding:2px 8px;border-radius:99px">Bozza</span></div></div>'
       +'<div style="display:flex;gap:6px">'
       +'<button class="btn sm" onclick="editLiveSession(\''+s.id+'\')"><i class="ti ti-pencil"></i> Modifica</button>'
-      +'<button class="btn sm pr" onclick="activateLiveSession(\''+s.id+'\')"><i class="ti ti-bolt"></i> Attiva</button>'
+      +'<button class="btn sm pr" onclick="showLiveActivateModal(\''+s.id+'\',false)"><i class="ti ti-bolt"></i> Attiva</button>'
       +'</div></div>';
   });
   html += '<button class="btn sm" style="margin-top:.25rem" onclick="showCreateLiveForm()"><i class="ti ti-plus"></i> Crea nuova LIVE</button>';
@@ -3272,7 +3308,7 @@ function renderLiveManager(){
         +'<div style="display:flex;gap:6px;flex-wrap:wrap">'
         +'<button class="btn sm" onclick="showLiveResults(\''+s.id+'\',\''+esc(s.title)+'\')"><i class="ti ti-trophy"></i> Risultati</button>'
         +'<button class="btn sm" onclick="editLiveSession(\''+s.id+'\')"><i class="ti ti-pencil"></i> Modifica</button>'
-        +'<button class="btn sm pr" onclick="reactivateLiveSession(\''+s.id+'\')"><i class="ti ti-refresh"></i> Rifai</button>'
+        +'<button class="btn sm pr" onclick="showLiveActivateModal(\''+s.id+'\',true)"><i class="ti ti-refresh"></i> Rifai</button>'
         +'</div></div>';
     });
     html += '</div>';
@@ -3552,16 +3588,66 @@ async function saveLiveSession(){
   } catch(e){ hideLoad(); alert('Errore nel salvataggio: '+e.message); }
 }
 
-async function activateLiveSession(sessionId){
-  if(!confirm('Attivare questa sessione LIVE? Tutti gli utenti la vedranno appena entrano.')) return;
+function showLiveActivateModal(sessionId, isReactivate){
+  var session = (lmState.sessions||[]).find(function(s){ return s.id===sessionId; });
+  var titleEl = document.getElementById('modal-live-active-title');
+  if(titleEl) titleEl.textContent = session ? session.title : '';
+  var hrsSel = document.getElementById('modal-live-active-hrs');
+  hrsSel.value = '48';
+  var sel = document.getElementById('modal-live-active-stores');
+  sel.innerHTML = '<option value="__ALL__">&#9989; Tutti gli store</option>'
+    + stores.map(function(s){ return '<option value="'+esc(s.name)+'">'+esc(s.name)+'</option>'; }).join('');
+  var allOpt = sel.options[0];
+  if(session && Array.isArray(session.stores) && session.stores.length){
+    Array.from(sel.options).forEach(function(o){ o.selected = session.stores.indexOf(o.value)!==-1; });
+  } else {
+    allOpt.selected = true;
+  }
+  var modal = document.getElementById('modal-live-active');
+  modal.dataset.sessionId = sessionId;
+  modal.dataset.reactivate = isReactivate ? '1' : '0';
+  modal.style.display = 'flex';
+}
+
+function onLiveActiveStoresChange(){
+  var sel = document.getElementById('modal-live-active-stores');
+  var opts = Array.from(sel.options);
+  var allOpt = opts.find(function(o){ return o.value==='__ALL__'; });
+  var justClickedAll = allOpt && allOpt.selected;
+  var anyOtherSelected = opts.some(function(o){ return o.value!=='__ALL__' && o.selected; });
+  if(justClickedAll && anyOtherSelected){
+    opts.forEach(function(o){ if(o.value!=='__ALL__') o.selected=false; });
+  } else if(anyOtherSelected && allOpt){
+    allOpt.selected = false;
+  } else if(!anyOtherSelected && !justClickedAll && allOpt){
+    allOpt.selected = true;
+  }
+}
+
+async function confirmLiveActivate(){
+  var modal = document.getElementById('modal-live-active');
+  var sessionId = modal.dataset.sessionId;
+  var isReactivate = modal.dataset.reactivate === '1';
+  var hrs = parseInt(document.getElementById('modal-live-active-hrs').value,10) || 48;
+  var sel = document.getElementById('modal-live-active-stores');
+  var selectedVals = Array.from(sel.selectedOptions).map(function(o){ return o.value; });
+  var storesSel = (selectedVals.indexOf('__ALL__')!==-1 || selectedVals.length===0) ? [] : selectedVals;
+  modal.style.display = 'none';
+  if(isReactivate) await reactivateLiveSession(sessionId, hrs, storesSel);
+  else await activateLiveSession(sessionId, hrs, storesSel);
+}
+
+async function activateLiveSession(sessionId, hrs, storesSel){
+  hrs = hrs || 48; storesSel = storesSel || [];
   await sb.from('live_sessions').update({status:'ended'}).eq('status','active');
   // Reset anche i campi della schermata (slide/pausa/display_mode): se questa
   // sessione era gia' stata usata in precedenza, senza questo reset restano
   // "sporchi" i dati della vecchia slide mostrata e riappaiono a ogni riavvio.
+  var expiresAt = new Date(Date.now()+hrs*3600000).toISOString();
   var res = await sb.from('live_sessions').update({
     status:'active', current_question_index:-1, question_started_at:null,
     display_mode:'question', slide_title:'', slide_text:'', slide_image_url:null,
-    slide_color:'#C9A84C', pause_prompt:''
+    slide_color:'#C9A84C', pause_prompt:'', expires_at:expiresAt, stores:storesSel
   }).eq('id',sessionId);
   if(res.error){ alert('Errore: '+res.error.message); return; }
   await loadLiveSessions();
@@ -3574,14 +3660,16 @@ async function confirmEndLive(sessionId){
   await loadLiveSessions();
 }
 
-async function reactivateLiveSession(sessionId){
+async function reactivateLiveSession(sessionId, hrs, storesSel){
   if(!confirm('Riattivare questa sessione? Tutte le risposte precedenti verranno cancellate.')) return;
+  hrs = hrs || 48; storesSel = storesSel || [];
   // Delete previous responses for this session
   await sb.from('live_responses').delete().eq('session_id',sessionId);
   // End any currently active session
   await sb.from('live_sessions').update({status:'ended'}).eq('status','active');
   // Reactivate
-  var res = await sb.from('live_sessions').update({status:'active', current_question_index:-1, question_started_at:null}).eq('id',sessionId);
+  var expiresAt = new Date(Date.now()+hrs*3600000).toISOString();
+  var res = await sb.from('live_sessions').update({status:'active', current_question_index:-1, question_started_at:null, expires_at:expiresAt, stores:storesSel}).eq('id',sessionId);
   if(res.error){ alert('Errore: '+res.error.message); return; }
   await loadLiveSessions();
 }
