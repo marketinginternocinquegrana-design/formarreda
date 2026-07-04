@@ -106,7 +106,7 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#0d0f11;color:#e8
       </div>
       <div style="display:flex;gap:8px;align-items:center">
         <button class="btn sm" id="btn-prev" onclick="prevQuestion()" style="display:none"><i class="ti ti-chevron-left"></i> Indietro</button>
-        <button class="btn pr lg" id="btn-start" onclick="startFirstQuestion()" style="display:none"><i class="ti ti-player-play"></i> Avvia prima domanda</button>
+        <button class="btn pr lg" id="btn-start" onclick="startFirstQuestion()" style="display:none"><i class="ti ti-player-play"></i> Avvia sessione (automatica)</button>
         <button class="btn pr" id="btn-next" onclick="nextQuestion()" style="display:none"><i class="ti ti-chevron-right"></i> Prossima domanda</button>
         <button class="btn dn" id="btn-end" onclick="endLive()" style="display:none"><i class="ti ti-player-stop"></i> Termina LIVE</button>
       </div>
@@ -258,6 +258,7 @@ var H = {
   slides: [],
   pollInterval: null,
   timerInterval: null,
+  autoTimer: null,
   timeLeft: 0
 };
 
@@ -382,7 +383,7 @@ function renderQuestionWaiting(){
     '<div style="text-align:center;padding:3rem 1rem">'
     +'<div style="font-size:52px;margin-bottom:1rem">&#9889;</div>'
     +'<div style="font-size:20px;font-weight:700;color:var(--ac)">Sessione pronta</div>'
-    +'<div style="font-size:14px;color:var(--mu);margin-top:.75rem">Gli studenti stanno aspettando. Clicca <strong>Avvia prima domanda</strong> per iniziare.</div>'
+    +'<div style="font-size:14px;color:var(--mu);margin-top:.75rem">Gli studenti stanno aspettando. Clicca <strong>Avvia sessione</strong>: slide e domande si susseguiranno da sole in automatico (puoi comunque usare Pausa / Prossima domanda per intervenire manualmente).</div>'
     +'</div>';
 }
 
@@ -548,19 +549,39 @@ async function refreshStats(){
     .select('answer_index,is_correct')
     .eq('session_id',H.session.id)
     .eq('question_id',q.id);
+  // La richiesta e' asincrona: se nel frattempo la domanda o la modalita' sono
+  // cambiate (slide successiva, pausa, classifica...) non tocchiamo piu' il DOM,
+  // altrimenti una risposta arrivata in ritardo puo' far ricomparire la
+  // distribuzione sotto una slide diversa.
+  if(H.session.current_question_index !== qIdx || (H.session.display_mode||'question') !== 'question') return;
   var data = res.data || [];
   var answered = data.length;
-  var correct = data.filter(function(r){ return r.is_correct; }).length;
   document.getElementById('stat-answered').textContent = answered;
+
+  var distEl = document.getElementById('answer-dist');
+  var elapsed = H.session.question_started_at ?
+    (Date.now()-new Date(H.session.question_started_at).getTime())/1000 : 0;
+  var timeUp = elapsed >= q.time_limit;
+
+  if(!timeUp){
+    // Finche' il tempo non e' scaduto non mostriamo ne' la risposta corretta
+    // ne' la distribuzione dei voti: sullo schermo condiviso permetterebbe
+    // ai ritardatari di copiare la risposta di chi ha gia' votato.
+    document.getElementById('stat-correct').textContent = '—';
+    document.getElementById('stat-pct').textContent = '—';
+    if(distEl) distEl.style.display = 'none';
+    return;
+  }
+
+  var correct = data.filter(function(r){ return r.is_correct; }).length;
   document.getElementById('stat-correct').textContent = correct;
   document.getElementById('stat-pct').textContent = answered ? Math.round(correct/answered*100)+'%' : '—';
 
-  // Distribution
+  // Distribution (solo a tempo scaduto)
   if(answered>0){
     var opts = Array.isArray(q.options)?q.options:JSON.parse(q.options||'[]');
     var counts = new Array(opts.length).fill(0);
     data.forEach(function(r){ if(r.answer_index>=0&&r.answer_index<opts.length) counts[r.answer_index]++; });
-    var distEl = document.getElementById('answer-dist');
     var distBody = document.getElementById('answer-dist-body');
     distEl.style.display='block';
     distBody.innerHTML = counts.map(function(c,i){
@@ -577,6 +598,8 @@ async function refreshStats(){
         +'</div>'
         +'</div>';
     }).join('');
+  } else if(distEl){
+    distEl.style.display='none';
   }
 }
 
@@ -658,6 +681,7 @@ var selectedSlideColor = '#C9A84C';
 var pendingSlideFile = null;
 
 function openSlideEditor(){
+  clearTimeout(H.autoTimer);
   pendingSlideFile = null;
   document.getElementById('slide-modal').style.display='flex';
   document.getElementById('slide-img-preview').style.display='none';
@@ -753,6 +777,7 @@ function closePauseModal(){
   document.getElementById('pause-modal').style.display='none';
 }
 async function startPause(){
+  clearTimeout(H.autoTimer);
   var prompt = (document.getElementById('pause-prompt-input').value||'').trim();
   var res = await sb.from('live_sessions').update({
     display_mode:'paused', pause_prompt:prompt
@@ -767,6 +792,7 @@ async function startPause(){
 
 // ── Classifica a schermo ──
 async function showLeaderboardScreen(){
+  clearTimeout(H.autoTimer);
   var res = await sb.from('live_sessions').update({display_mode:'leaderboard'}).eq('id',H.session.id);
   if(res.error){ alert('Errore: '+res.error.message); return; }
   H.session.display_mode='leaderboard';
@@ -782,20 +808,84 @@ async function resumeQuestion(){
   updateDisplayPill('question');
   toggleQuestionExtras(true);
   renderCurrentQuestion();
+  scheduleQuestionAutoAdvance(H.session.current_question_index);
+}
+
+// ── Avanzamento automatico (slide -> domande -> slide successiva -> ...) ──
+// A quale blocco appartiene una domanda: usa block_index se presente,
+// altrimenti assume 2 domande per blocco (stesso fallback usato nel builder).
+function blockOfQ(qIdx){
+  var q = H.questions[qIdx];
+  if(q && q.block_index !== undefined && q.block_index !== null) return q.block_index;
+  return Math.floor(qIdx/2);
+}
+function firstQuestionIndexOfBlock(bi){
+  for(var i=0;i<H.questions.length;i++){ if(blockOfQ(i)===bi) return i; }
+  return -1;
+}
+
+// Mostra la slide di un blocco e programma il passaggio automatico alla sua
+// prima domanda dopo "slide_seconds" secondi (default 120 = 2 minuti).
+async function autoShowBlockSlide(bi){
+  clearTimeout(H.autoTimer);
+  await showBlockSlide(bi);
+  var secs = (H.session && H.session.slide_seconds) || 120;
+  H.autoTimer = setTimeout(function(){
+    var qIdx = firstQuestionIndexOfBlock(bi);
+    if(qIdx===-1) return;
+    setQuestion(qIdx);
+  }, secs*1000);
+}
+
+// Programma l'avanzamento automatico dopo una domanda: attende il tempo della
+// domanda + qualche secondo per mostrare la risposta corretta, poi passa
+// avanti da solo (anche se qualcuno non ha ancora votato).
+function scheduleQuestionAutoAdvance(idx){
+  clearTimeout(H.autoTimer);
+  var q = H.questions[idx];
+  if(!q) return;
+  var revealPause = 4; // secondi di pausa per mostrare la risposta corretta prima di andare avanti
+  H.autoTimer = setTimeout(function(){
+    if(H.session.current_question_index !== idx) return; // il formatore e' gia' intervenuto manualmente
+    advanceAfterQuestion(idx);
+  }, (q.time_limit+revealPause)*1000);
+}
+
+async function advanceAfterQuestion(currentQIdx){
+  var nextQIdx = currentQIdx+1;
+  if(nextQIdx >= H.questions.length){
+    // Fine domande: mostra la classifica finale. La LIVE resta attiva finche'
+    // il formatore non clicca "Termina LIVE".
+    await showLeaderboardScreen();
+    return;
+  }
+  var curBlock = blockOfQ(currentQIdx);
+  var nextBlock = blockOfQ(nextQIdx);
+  if(nextBlock !== curBlock && H.slides[nextBlock]){
+    await autoShowBlockSlide(nextBlock);
+  } else {
+    await setQuestion(nextQIdx);
+  }
 }
 
 async function startFirstQuestion(){
-  await setQuestion(0);
+  if(H.slides.length && H.slides[0]){
+    await autoShowBlockSlide(0);
+  } else {
+    await setQuestion(0);
+  }
 }
 
 async function nextQuestion(){
-  var next = H.session.current_question_index + 1;
-  if(next >= H.questions.length) return;
-  await setQuestion(next);
+  clearTimeout(H.autoTimer);
+  var qIdx = H.session.current_question_index;
+  if(qIdx < 0){ await startFirstQuestion(); return; }
+  await advanceAfterQuestion(qIdx);
 }
 
 async function setQuestion(idx){
   clearInterval(H.timerInterval);
+  clearTimeout(H.autoTimer);
   var res = await sb.from('live_sessions').update({
     current_question_index: idx,
     question_started_at: new Date().toISOString(),
@@ -807,12 +897,14 @@ async function setQuestion(idx){
   document.getElementById('answer-dist').style.display='none';
   toggleQuestionExtras(true);
   renderSession();
+  scheduleQuestionAutoAdvance(idx);
 }
 
 async function endLive(){
   if(!confirm('Terminare la LIVE? Gli studenti vedranno la classifica finale.')) return;
   clearInterval(H.pollInterval);
   clearInterval(H.timerInterval);
+  clearTimeout(H.autoTimer);
   var res = await sb.from('live_sessions').update({status:'ended'}).eq('id',H.session.id);
   if(res.error){ alert('Errore: '+res.error.message); return; }
   await showEndedScreen();
