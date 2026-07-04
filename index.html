@@ -1715,17 +1715,24 @@ function renderLoginLessons(){
   var list=document.getElementById('login-lessons-list');
   var lsSel=document.getElementById('ls');
   var studentStore=lsSel?lsSel.value:'';
-  if(!studentStore||!activeLessons.length){box.style.display='none';return;}
+  if(!activeLessons.length){box.style.display='none';return;}
+  // Se lo store dello studente e' gia' noto (codice dipendente risolto), mostra solo le lezioni per il suo store.
+  // Altrimenti mostra tutte le lezioni attive, indicando a quale store sono riservate.
   var matches=activeLessons.filter(function(e){
-    return lessons[e.code] && (!e.stores||!e.stores.length||e.stores.indexOf(studentStore)!==-1);
+    if(!lessons[e.code]) return false;
+    var isAll=!e.stores||!e.stores.length;
+    if(studentStore) return isAll||e.stores.indexOf(studentStore)!==-1;
+    return true;
   });
   if(!matches.length){box.style.display='none';return;}
   box.style.display='block';
   list.innerHTML=matches.map(function(e){
     var l=lessons[e.code];
+    var isAll=!e.stores||!e.stores.length;
+    var scopeTxt=isAll?'Tutti gli store':e.stores.join(', ');
     return '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;font-size:13px">'
       +'<div><div class="f600">'+esc(l.title)+'</div>'
-      +'<div class="mu" style="margin-top:2px;font-size:12px">Lezione di oggi</div></div>'
+      +'<div class="mu" style="margin-top:2px;font-size:12px">'+(studentStore?'Lezione di oggi':esc(scopeTxt))+'</div></div>'
       +'<div class="lcode-tag" style="cursor:pointer" onclick="document.getElementById(\'lc\').value=\''+e.code+'\'">'
       +esc(e.code)+'</div></div>';
   }).join('');
@@ -2905,9 +2912,20 @@ async function pollLiveSession(){
       }
       return; // don't process questions while in special display mode
     }
-    // Back to question mode after slide/pause
-    if(prevMode !== 'question' && data.current_question_index < 0){
-      renderLiveWaiting(); return;
+    // Back to question mode after slide/pause: restore the question view
+    // even if the question index itself did not change (e.g. Pausa -> Riprendi
+    // on the same question), otherwise the student stays stuck on the old screen.
+    if(prevMode !== 'question'){
+      if(data.current_question_index < 0){
+        renderLiveWaiting(); return;
+      }
+      var qIdxR = data.current_question_index;
+      liveState.currentQIndex = qIdxR;
+      liveState.questionStartedAt = data.question_started_at;
+      var qR = liveState.questions[qIdxR];
+      if(qR && !liveState.answered[qR.id]) renderLiveQuestion(qR);
+      else if(qR && liveState.answered[qR.id]) renderLiveWaitNext();
+      return;
     }
 
     var qIdx = data.current_question_index;
