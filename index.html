@@ -225,6 +225,15 @@ body{font-family:system-ui,-apple-system,sans-serif;background:#111214;color:#e8
       </select>
     </div>
     <div class="field">
+      <label style="font-size:13px;font-weight:600;margin-bottom:6px;display:block">Durata slide (avanzamento automatico)</label>
+      <select id="modal-live-active-slidesec" style="width:100%;border:1px solid var(--br);border-radius:8px;padding:8px 12px;font-size:14px;background:var(--cb);color:var(--tx);font-family:inherit">
+        <option value="60">1 minuto</option>
+        <option value="120" selected>2 minuti</option>
+        <option value="180">3 minuti</option>
+      </select>
+      <div class="mu sm-tx mt1">Ogni slide di sezione resta a schermo per questo tempo, poi parte la domanda in automatico.</div>
+    </div>
+    <div class="field">
       <label style="font-size:13px;font-weight:600;margin-bottom:6px;display:block">Store abilitati</label>
       <select id="modal-live-active-stores" multiple size="6" style="width:100%;border:1px solid var(--br);border-radius:8px;padding:8px 12px;font-size:14px;background:var(--cb);color:var(--tx);font-family:inherit" onchange="onLiveActiveStoresChange()">
         <option value="__ALL__" selected>&#9989; Tutti gli store</option>
@@ -3594,6 +3603,8 @@ function showLiveActivateModal(sessionId, isReactivate){
   if(titleEl) titleEl.textContent = session ? session.title : '';
   var hrsSel = document.getElementById('modal-live-active-hrs');
   hrsSel.value = '48';
+  var slideSecSel = document.getElementById('modal-live-active-slidesec');
+  if(slideSecSel) slideSecSel.value = (session && session.slide_seconds) ? String(session.slide_seconds) : '120';
   var sel = document.getElementById('modal-live-active-stores');
   sel.innerHTML = '<option value="__ALL__">&#9989; Tutti gli store</option>'
     + stores.map(function(s){ return '<option value="'+esc(s.name)+'">'+esc(s.name)+'</option>'; }).join('');
@@ -3629,16 +3640,17 @@ async function confirmLiveActivate(){
   var sessionId = modal.dataset.sessionId;
   var isReactivate = modal.dataset.reactivate === '1';
   var hrs = parseInt(document.getElementById('modal-live-active-hrs').value,10) || 48;
+  var slideSec = parseInt(document.getElementById('modal-live-active-slidesec').value,10) || 120;
   var sel = document.getElementById('modal-live-active-stores');
   var selectedVals = Array.from(sel.selectedOptions).map(function(o){ return o.value; });
   var storesSel = (selectedVals.indexOf('__ALL__')!==-1 || selectedVals.length===0) ? [] : selectedVals;
   modal.style.display = 'none';
-  if(isReactivate) await reactivateLiveSession(sessionId, hrs, storesSel);
-  else await activateLiveSession(sessionId, hrs, storesSel);
+  if(isReactivate) await reactivateLiveSession(sessionId, hrs, storesSel, slideSec);
+  else await activateLiveSession(sessionId, hrs, storesSel, slideSec);
 }
 
-async function activateLiveSession(sessionId, hrs, storesSel){
-  hrs = hrs || 48; storesSel = storesSel || [];
+async function activateLiveSession(sessionId, hrs, storesSel, slideSec){
+  hrs = hrs || 48; storesSel = storesSel || []; slideSec = slideSec || 120;
   await sb.from('live_sessions').update({status:'ended'}).eq('status','active');
   // Reset anche i campi della schermata (slide/pausa/display_mode): se questa
   // sessione era gia' stata usata in precedenza, senza questo reset restano
@@ -3647,7 +3659,7 @@ async function activateLiveSession(sessionId, hrs, storesSel){
   var res = await sb.from('live_sessions').update({
     status:'active', current_question_index:-1, question_started_at:null,
     display_mode:'question', slide_title:'', slide_text:'', slide_image_url:null,
-    slide_color:'#C9A84C', pause_prompt:'', expires_at:expiresAt, stores:storesSel
+    slide_color:'#C9A84C', pause_prompt:'', expires_at:expiresAt, stores:storesSel, slide_seconds:slideSec
   }).eq('id',sessionId);
   if(res.error){ alert('Errore: '+res.error.message); return; }
   await loadLiveSessions();
@@ -3660,16 +3672,16 @@ async function confirmEndLive(sessionId){
   await loadLiveSessions();
 }
 
-async function reactivateLiveSession(sessionId, hrs, storesSel){
+async function reactivateLiveSession(sessionId, hrs, storesSel, slideSec){
   if(!confirm('Riattivare questa sessione? Tutte le risposte precedenti verranno cancellate.')) return;
-  hrs = hrs || 48; storesSel = storesSel || [];
+  hrs = hrs || 48; storesSel = storesSel || []; slideSec = slideSec || 120;
   // Delete previous responses for this session
   await sb.from('live_responses').delete().eq('session_id',sessionId);
   // End any currently active session
   await sb.from('live_sessions').update({status:'ended'}).eq('status','active');
   // Reactivate
   var expiresAt = new Date(Date.now()+hrs*3600000).toISOString();
-  var res = await sb.from('live_sessions').update({status:'active', current_question_index:-1, question_started_at:null, expires_at:expiresAt, stores:storesSel}).eq('id',sessionId);
+  var res = await sb.from('live_sessions').update({status:'active', current_question_index:-1, question_started_at:null, expires_at:expiresAt, stores:storesSel, slide_seconds:slideSec}).eq('id',sessionId);
   if(res.error){ alert('Errore: '+res.error.message); return; }
   await loadLiveSessions();
 }
