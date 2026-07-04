@@ -314,10 +314,15 @@ function renderBlocksPanel(){
 async function showBlockSlide(bi){
   var slide = H.slides[bi];
   if(!slide) return;
+  // Le slide dei blocchi sono immagini gia' complete (titolo e testo dentro
+  // l'immagine stessa): niente overlay di titolo/testo sopra, altrimenti si
+  // duplica e copre il contenuto. L'overlay si usa solo per le slide create
+  // a mano dal pulsante "Slide" senza immagine gia' composta.
+  var hasImg = !!slide.image_url;
   var upd = {
     display_mode:'slide',
-    slide_title: slide.title||'',
-    slide_text: slide.body_text||'',
+    slide_title: hasImg ? '' : (slide.title||''),
+    slide_text: hasImg ? '' : (slide.body_text||''),
     slide_color: slide.color||'#C9A84C',
     slide_image_url: slide.image_url||null
   };
@@ -465,11 +470,22 @@ function renderHostSlideScreen(session){
   clearInterval(H.timerInterval);
   toggleQuestionExtras(false);
   var hasImg = !!session.slide_image_url;
+  var hasText = !!(session.slide_title || session.slide_text);
+
+  if(hasImg && !hasText){
+    // Slide di blocco: immagine gia' completa, la mostriamo intera senza
+    // ritagli (contain) e senza scritte sopra.
+    document.getElementById('question-area').innerHTML =
+      '<div style="min-height:50vh;border-radius:14px;background:'+(session.slide_color||'#111')+';display:flex;align-items:center;justify-content:center;overflow:hidden">'
+      +'<img src="'+session.slide_image_url+'" style="width:100%;height:100%;max-height:70vh;object-fit:contain;border-radius:14px">'
+      +'</div>';
+    return;
+  }
+
   var bgStyle = hasImg
     ? 'background-image:url('+session.slide_image_url+');background-size:cover;background-position:center;'
     : 'background:'+(session.slide_color||'#C9A84C')+';';
   var overlay = hasImg ? '<div style="position:absolute;inset:0;background:rgba(0,0,0,.42);border-radius:14px"></div>' : '';
-  var hasText = !!(session.slide_title || session.slide_text);
   document.getElementById('question-area').innerHTML =
     '<div style="min-height:50vh;border-radius:14px;'+bgStyle+'display:flex;flex-direction:column;align-items:center;justify-content:center;padding:2rem;text-align:center;position:relative;overflow:hidden">'
     +overlay
