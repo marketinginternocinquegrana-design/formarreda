@@ -621,7 +621,12 @@ async function pollSession(){
     var newMode = newData.display_mode || 'question';
     var changedQ = newData.current_question_index !== H.session.current_question_index;
     H.session = newData;
-    if(newData.status==='ended'){ clearInterval(H.pollInterval); show('no-live-screen'); return; }
+    if(newData.status==='ended'){
+      clearInterval(H.pollInterval);
+      clearInterval(H.timerInterval);
+      await showEndedScreen();
+      return;
+    }
     if(changedQ){ renderSession(); renderBlocksPanel(); }
     if(newMode !== prevMode){
       if(newMode==='slide') renderHostSlideScreen(newData);
@@ -810,7 +815,13 @@ async function endLive(){
   clearInterval(H.timerInterval);
   var res = await sb.from('live_sessions').update({status:'ended'}).eq('id',H.session.id);
   if(res.error){ alert('Errore: '+res.error.message); return; }
-  // Build final leaderboard
+  await showEndedScreen();
+}
+
+// Costruisce e mostra la classifica finale — richiamata sia quando la LIVE
+// viene terminata da qui, sia quando viene terminata da un'altra scheda
+// (es. pulsante "Termina LIVE" nel pannello Formatore).
+async function showEndedScreen(){
   var lbRes = await sb.from('live_responses').select('user_name,store,points').eq('session_id',H.session.id);
   var data = lbRes.data || [];
   var byUser = {};
@@ -821,7 +832,7 @@ async function endLive(){
   });
   var ranked = Object.values(byUser).sort(function(a,b){ return b.total-a.total; });
   document.getElementById('ended-title').textContent = H.session.title;
-  document.getElementById('ended-subtitle').textContent = ranked.length + ' partecipant' + (ranked.length===1?'e':'i') + ' · ' + H.questions.length + ' domande';
+  document.getElementById('ended-subtitle').textContent = ranked.length + ' partecipant' + (ranked.length===1?'e':'i') + ' · ' + (H.questions?H.questions.length:0) + ' domande';
   var medals = ['🥇','🥈','🥉'];
   document.getElementById('ended-leaderboard').innerHTML = ranked.length ? ranked.map(function(u,i){
     return '<div class="rank-row rank-'+(i+1)+'">'
