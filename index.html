@@ -3490,7 +3490,14 @@ async function saveLiveSession(){
 async function activateLiveSession(sessionId){
   if(!confirm('Attivare questa sessione LIVE? Tutti gli utenti la vedranno appena entrano.')) return;
   await sb.from('live_sessions').update({status:'ended'}).eq('status','active');
-  var res = await sb.from('live_sessions').update({status:'active', current_question_index:-1, question_started_at:null}).eq('id',sessionId);
+  // Reset anche i campi della schermata (slide/pausa/display_mode): se questa
+  // sessione era gia' stata usata in precedenza, senza questo reset restano
+  // "sporchi" i dati della vecchia slide mostrata e riappaiono a ogni riavvio.
+  var res = await sb.from('live_sessions').update({
+    status:'active', current_question_index:-1, question_started_at:null,
+    display_mode:'question', slide_title:'', slide_text:'', slide_image_url:null,
+    slide_color:'#C9A84C', pause_prompt:''
+  }).eq('id',sessionId);
   if(res.error){ alert('Errore: '+res.error.message); return; }
   await loadLiveSessions();
 }
