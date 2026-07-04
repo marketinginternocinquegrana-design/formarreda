@@ -777,11 +777,14 @@ async function setQuestion(idx){
   clearInterval(H.timerInterval);
   var res = await sb.from('live_sessions').update({
     current_question_index: idx,
-    question_started_at: new Date().toISOString()
+    question_started_at: new Date().toISOString(),
+    display_mode: 'question',
+    slide_title: '', slide_text: '', slide_image_url: null, pause_prompt: ''
   }).eq('id',H.session.id).select().single();
   if(res.error){ alert('Errore: '+res.error.message); return; }
   H.session = res.data;
   document.getElementById('answer-dist').style.display='none';
+  toggleQuestionExtras(true);
   renderSession();
 }
 
