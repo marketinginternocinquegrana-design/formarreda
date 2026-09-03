@@ -1318,7 +1318,11 @@ function saveNameToStorage(n){ localStorage.setItem(CONSULTANT_NAME_KEY, n); }
 function saveStoreToStorage(s){ localStorage.setItem(CONSULTANT_STORE_KEY, s); }
 
 function initLoginName(){
-  var savedCode = localStorage.getItem('ua_emp_code');
+  // Accesso automatico da Unlimited Workspace: se arrivo con ?code=CODICE
+  // nell'URL, uso quel codice al posto (o in aggiunta) di quello salvato.
+  var params = new URLSearchParams(window.location.search);
+  var urlCode = params.get('code');
+  var savedCode = urlCode ? urlCode.trim().toUpperCase() : localStorage.getItem('ua_emp_code');
   if(savedCode){
     var ecEl = document.getElementById('ec');
     if(ecEl){ ecEl.value = savedCode; resolveEmployeeCode(); }
